@@ -1,0 +1,39 @@
+===== Day 2 baseline =====
+Sun Oct 18 05:03:55 PM CST 2026
+Linux localhost.localdomain 6.8.12-1021-tegra #1 SMP PREEMPT Mon Jun  1 13:25:46 PDT 2026 aarch64 aarch64 aarch64 GNU/Linux
+Python 3.12.3
+OpenCV: 4.8.0
+NumPy: 1.26.4
+TensorRT: 10.16.2.10
+
+===== Engine =====
+-rw-rw-r-- 1 chery chery 8.5M Oct 13 14:16 engines/yolov8n_fp16.engine
+
+===== Images =====
+images/humans_7.jpg
+images/humans_9.jpg
+images/object_3.jpg
+images/object_8.jpg
+images/bus.jpg
+images/object_4.jpg
+images/city_3.jpg
+images/humans_5.jpg
+images/city_5.jpg
+images/humans_2.jpg
+images/city_2.jpg
+images/humans_4.jpg
+images/city_4.jpg
+images/humans_3.jpg
+images/object_7.jpg
+images/object_2.jpg
+images/city_0.jpg
+images/object_1.jpg
+images/humans_8.jpg
+images/humans_1.jpg
+images/object_6.jpg
+images/object_5.jpg
+images/city_1.jpg
+images/zidane.jpg
+images/humans_6.jpg
+images/object_0.jpg
+images/humans_0.jpg

@@ -1,0 +1,12 @@
+
+===== Day 2 TensorRT Engine Build =====
+Sun Oct 18 02:39:00 PM CST 2026
+ONNX: models/yolov8n.onnx
+Engine: engines/yolov8n_fp16.engine
+TensorRT: 10.16.2.10
+Input: images [1,3,640,640], FP32
+Output: output0 [1,84,8400], FP32
+Precision: FP32+FP16 optimization
+Engine build: PASSED
+GPU latency mean: approximately 3.73 ms
+trtexec throughput: approximately 267.4 qps

@@ -1,0 +1,6 @@
+-v `realpath ~/.ssh`:/home/admin/.ssh:ro
+-v `realpath ~/.aws`:/home/admin/.aws:ro
+-v `realpath ~/.cache`:/home/admin/.cache
+-v `realpath ~/.config`:/home/admin/.config
+-v `realpath ~/.gitconfig`:/home/admin/.gitconfig
+-v `realpath ~/.bash_history`:/home/admin/.bash_history
