@@ -1,0 +1,744 @@
+#! /usr/bin/python3
+#
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
+import glob
+import os
+import shlex
+import subprocess
+import sys
+
+from build_image_layers import (
+    check_docker_logins,
+    get_image_name,
+    main as build_image_layers,
+)
+from isaac_ros_common_config_utils import (
+    get_build_order,
+    get_isaac_ros_common_config_path,
+    get_isaac_ros_common_config_values,
+)
+
+
+def validate_isaac_dir(isaac_dir):
+    if not os.path.isdir(isaac_dir):
+        print(f"Specified Isaac ROS dev directory does not exist: {isaac_dir}")
+        sys.exit(1)
+
+
+def check_user_in_docker_group():
+    output = subprocess.check_output(["groups", os.getenv("USER")], universal_newlines=True)
+    if "docker" not in output:
+        print(
+            f"User {os.getenv('USER')} is not a member of the 'docker' group "
+            "and cannot run docker commands without sudo."
+        )
+        print(
+            "Run 'sudo usermod -aG docker $USER && newgrp docker' to add user to "
+            "'docker' group, then re-run this script."
+        )
+        print("See: https://docs.docker.com/engine/install/linux-postinstall/")
+        sys.exit(1)
+
+
+def check_docker_running():
+    try:
+        subprocess.check_output(["docker", "ps"], stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        print(
+            "Unable to run docker commands. If you have recently added $USER to "
+            "'docker' group, you may need to log out and log back in for it to take effect."
+        )
+        print("Otherwise, please check your Docker installation.")
+        sys.exit(1)
+
+
+def check_docker_buildx_containerd_cache_enabled():
+    try:
+        subprocess.check_output(["docker", "buildx", "inspect", "--bootstrap"])
+    except subprocess.CalledProcessError:
+        print(
+            "Unable to detect docker buildx containerd cache. "
+            "Please follow these instructions: "
+            "https://docs.docker.com/engine/storage/containerd/#enable-containerd-image-store-on-docker-engine"  # noqa:E501
+        )
+        sys.exit(1)
+
+
+def check_git_lfs_installed():
+    try:
+        subprocess.check_output(["git", "lfs"], stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        print(
+            "git-lfs is not installed. Please make sure git-lfs is installed before "
+            "you clone the repo."
+        )
+        sys.exit(1)
+
+
+def check_lfs_files(isaac_dir):
+    print(isaac_dir)
+    try:
+        output = subprocess.check_output(
+            ["git", "lfs", "ls-files"],
+            cwd=isaac_dir,
+            universal_newlines=True
+        )
+        lfs_files = [line for line in output.splitlines()]
+
+        output = subprocess.check_output(
+            ["git", "lfs", "status"],
+            cwd=isaac_dir,
+            universal_newlines=True
+        )
+        lfs_files_status = [line for line in output.splitlines()]
+
+        for line in lfs_files:
+            if "-" in line.split()[1]:
+                file = line.split()[2]
+                if not any(file in line for line in lfs_files_status):
+                    if not os.path.exists(os.path.join(isaac_dir, file)):
+                        print(f"LFS file {file} is missing. "
+                              "Please run `git lfs pull` after installing git-lfs.")
+                        sys.exit(1)
+            else:
+                pass
+
+    except subprocess.CalledProcessError:
+        pass
+
+
+def remove_exited_container(container_name):
+    output = subprocess.check_output(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--quiet",
+            "--filter",
+            "status=exited",
+            "--filter",
+            f"name={container_name}"
+        ]
+    )
+    if output:
+        subprocess.run(["docker", "rm", container_name], stdout=subprocess.DEVNULL)
+
+
+def attach_to_running_container(container_name):
+    """Attach to an already-running container. Returns True if a session was created."""
+    output = subprocess.check_output(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--quiet",
+            "--filter",
+            "status=running",
+            "--filter",
+            f"name={container_name}"
+        ]
+    )
+    if output:
+        print(f"Attaching to running container: {container_name}")
+        isaac_ros_ws = subprocess.check_output(
+            ["docker", "exec", container_name, "printenv", "ISAAC_ROS_WS"],
+            universal_newlines=True
+        ).strip()
+        print(f"Docker workspace: {isaac_ros_ws}")
+        subprocess.run(
+            [
+                "docker", "exec", "-i", "-t",
+                "-e", "TERM=xterm-256color",
+                "-e", "COLORTERM=truecolor",
+                "-e", "FORCE_COLOR=true",
+                "-u", "admin",
+                "--workdir", isaac_ros_ws,
+                container_name, "/bin/bash"
+            ],
+            env={
+                **os.environ,
+                "TERM": "xterm-256color",
+                "COLORTERM": "truecolor",
+                "FORCE_COLOR": "true"
+            }
+        )
+        return True
+    return False
+
+
+def make_docker_image_available(base_name, cached_image_name):
+    pull_result = subprocess.run(
+        [f"docker pull {base_name}"],
+        shell=True,
+        env={**os.environ, "TERM": "xterm-256color", "COLORTERM": "truecolor"}
+    )
+
+    local_image_result = subprocess.run(
+        ["docker", "image", "inspect", base_name],
+        capture_output=True,
+        env={**os.environ, "TERM": "xterm-256color", "COLORTERM": "truecolor"}
+    )
+
+    if pull_result.returncode == 0 or local_image_result.returncode == 0:
+        # Remove any existing cached image
+        subprocess.run(
+            ["docker", "rmi", cached_image_name],
+            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL
+        )
+        # Tag the image as our cached image name
+        tag_result = subprocess.run(
+            ["docker", "tag", base_name, cached_image_name]
+        )
+
+        return tag_result.returncode == 0
+
+    return False
+
+
+def get_existing_bash_configs():
+    """Returns a list of existing bash configuration files in the user's home directory."""
+    config_files = ['.bashrc', '.bash_profile', '.profile', '.dircolors']
+    existing_configs = []
+    for file in config_files:
+        if os.path.isfile(os.path.expanduser(f'~/{file}')):
+            existing_configs.append(file)
+    return existing_configs
+
+
+def get_docker_args(platform):
+    # Return arguments as complete flag-value pairs for shell=True usage
+    home_path = os.path.expanduser('~')
+    docker_args = [
+        "-v /tmp/.X11-unix:/tmp/.X11-unix",
+        f"-v {shlex.quote(home_path)}/.Xauthority:/home/admin/.Xauthority:rw",
+    ]
+    # Add existing bash config files
+    for config in get_existing_bash_configs():
+        docker_args.append(
+            f"-v {shlex.quote(home_path)}/{config}:/home/admin/{config}:ro"
+        )
+    docker_args.extend([
+        "-e DISPLAY",
+        "-e NVIDIA_VISIBLE_DEVICES=all",
+        "-e NVIDIA_DRIVER_CAPABILITIES=all",
+        "-e ROS_DOMAIN_ID",
+        "-e USER",
+        "-e ISAAC_ROS_WS=/workspaces/isaac_ros-dev",
+        f"-e HOST_USER_UID={os.getuid()}",
+        f"-e HOST_USER_GID={os.getgid()}",
+    ])
+    if os.path.exists("/etc/fastos-release"):
+        docker_args.append("-v /etc/fastos-release:/etc/fastos-release:ro")
+    if platform == "aarch64":
+        if "SSH_AUTH_SOCK" in os.environ:
+            ssh_auth_sock = os.environ['SSH_AUTH_SOCK']
+            docker_args.extend([
+                f"-v {shlex.quote(ssh_auth_sock)}:/ssh-agent",
+                "-e SSH_AUTH_SOCK=/ssh-agent",
+            ])
+        docker_args.extend([
+            "-v /usr/bin/tegrastats:/usr/bin/tegrastats",
+            "-v /sys/kernel/debug:/sys/kernel/debug:ro",  # Required for tegrastats
+            "-v /tmp/:/tmp/",
+            "-v /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra",
+            "-v /usr/src/jetson_multimedia_api:/usr/src/jetson_multimedia_api",
+            "-v /usr/src/jetson_sipl_api:/usr/src/jetson_sipl_api",
+            "--pid=host",
+            "-v /usr/share/vpi3:/usr/share/vpi3",
+            "-v /dev/input:/dev/input",
+            "-v /dev/bus/usb:/dev/bus/usb",
+        ])
+        # CoE (Camera over Ethernet) device nodes
+        for coe_dev in glob.glob("/dev/coe-chan-*"):
+            docker_args.append(f"--device={coe_dev}")
+
+        try:
+            output = subprocess.check_output(
+                ["getent", "group", "jtop"], text=True
+            ).strip()
+            if output:
+                group_id = output.split(":")[2]
+                docker_args.extend([
+                    "-v /run/jtop.sock:/run/jtop.sock:ro",
+                    f"--group-add {group_id}",
+                ])
+        except subprocess.CalledProcessError:
+            pass
+
+    return docker_args
+
+
+def get_gpu_docker_args(platform):
+    """Return Docker GPU arguments compatible with the host NVIDIA stack."""
+    if platform != "aarch64" or not os.path.isfile("/etc/igx-release"):
+        return ["--gpus all"]
+
+    try:
+        cdi_devices = subprocess.check_output(
+            ["/usr/bin/nvidia-ctk", "cdi", "list"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        cdi_devices = []
+
+    if "nvidia.com/gpu=all" in {device.strip() for device in cdi_devices}:
+        return ["--device=nvidia.com/gpu=all"]
+
+    # IGX uses the CSV mode of the NVIDIA container runtime. In this mode,
+    # Docker's --gpus flag requires the NVIDIA runtime to be selected explicitly.
+    return ["--runtime=nvidia", "--gpus all"]
+
+
+def realpath(path):
+    return subprocess.check_output(['realpath', os.path.expanduser(path)]).decode().strip()
+
+
+def load_docker_args_from_file():
+    docker_args_files = [os.getenv("DOCKER_ARGS_FILE", "")]
+    docker_args_files.append("~/.isaac_ros_dev-dockerargs")
+
+    if os.path.isfile(os.path.join(os.path.dirname(__file__), ".isaac_ros_dev-dockerargs")):
+        docker_args_files.append(os.path.join(
+            os.path.dirname(__file__), ".isaac_ros_dev-dockerargs"))
+    elif "ISAAC_ROS_WS" in os.environ and os.path.isfile(
+        os.path.expandvars("$ISAAC_ROS_WS/scripts/.isaac_ros_dev-dockerargs")
+    ):
+        docker_args_files.append(os.path.expandvars(
+            "$ISAAC_ROS_WS/scripts/.isaac_ros_dev-dockerargs"))
+    else:
+        docker_args_files.append("/etc/isaac-ros-cli/.isaac_ros_dev-dockerargs")
+
+    docker_args_filepaths = []
+    for docker_args_file in docker_args_files:
+        if os.path.isfile(docker_args_file):
+            docker_args_filepaths.append(docker_args_file)
+        elif os.path.isfile(os.path.join(os.path.dirname(__file__), docker_args_file)):
+            docker_args_filepaths.append(os.path.join(os.path.dirname(__file__), docker_args_file))
+        elif os.path.isfile(os.path.expanduser(docker_args_file)):
+            docker_args_filepaths.append(os.path.expanduser(docker_args_file))
+
+    if docker_args_filepaths:
+        docker_args = []
+        print(f"Using additional Docker run arguments from {docker_args_filepaths}")
+        for docker_args_filepath in docker_args_filepaths:
+            with open(docker_args_filepath, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    # Handle arguments wrapped in quotes for backward compatibility
+                    if ((line.startswith('"') and line.endswith('"')) or
+                            (line.startswith("'") and line.endswith("'"))):
+                        # Strip the outer quotes for old run_dev.sh-style arguments
+                        line = line[1:-1]
+
+                    if "`realpath" in line:
+                        # Replace `realpath` expressions with evaluated real paths
+                        start = line.find("`realpath") + len("`realpath ")
+                        end = line.find("`", start)
+                        path = line[start:end]
+                        resolved_path = realpath(path)
+                        # Quote the resolved path to handle spaces
+                        quoted_path = shlex.quote(resolved_path)
+                        line = line.replace(f"`realpath {path}`", quoted_path)
+                    # Make sure each line is a complete argument for shell=True
+                    docker_args.append(os.path.expandvars(line))
+        print(docker_args)
+        return docker_args
+    return []
+
+
+def run_docker_container(args, container_name, base_name, isaac_dir):
+    docker_args = get_docker_args(args.platform)
+    file_args = load_docker_args_from_file()
+
+    docker_args.extend(file_args)
+
+    # Build the command as a single string for shell=True
+    # Use proper shell quoting for arguments that might contain spaces
+    docker_command_parts = [
+        "docker run -it --rm",
+        "--privileged",
+        "--network host",
+        "--ipc=host",
+        "-e TERM=xterm-256color",
+        "-e COLORTERM=truecolor",
+        "-e FORCE_COLOR=true",
+        "--workdir /workspaces/isaac_ros-dev",
+    ]
+
+    # Pass ISAAC_ROS_PLATFORM if specified
+    if args.isaac_ros_platform:
+        docker_command_parts.append(
+            f"-e ISAAC_ROS_PLATFORM={shlex.quote(args.isaac_ros_platform)}"
+        )
+
+    # Add Docker arguments as strings
+    docker_command_parts.extend(docker_args)
+
+    # Add remaining arguments
+    docker_command_parts.extend([
+        f"-v {shlex.quote(isaac_dir)}:/workspaces/isaac_ros-dev",
+        "-v /etc/localtime:/etc/localtime:ro",
+        f"--name {shlex.quote(container_name)}",
+    ])
+    docker_command_parts.extend(get_gpu_docker_args(args.platform))
+    docker_command_parts.extend([
+        "--entrypoint /usr/local/bin/scripts/workspace-entrypoint.sh",
+        shlex.quote(base_name),
+        "/bin/bash"
+    ])
+
+    # Join all command parts with spaces to create a single command string
+    docker_command_str = " ".join(docker_command_parts)
+
+    print(f"Running {container_name}")
+    if args.verbose:
+        print(docker_command_str)
+
+    subprocess.run(
+        docker_command_str,
+        shell=True,
+        env={
+            **os.environ,
+            "TERM": "xterm-256color",
+            "COLORTERM": "truecolor",
+            "FORCE_COLOR": "true"
+        }
+    )
+
+
+def parse_args():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--mode",
+        choices=["run", "build", "start"],
+        default="run",
+        help=(
+            "Lifecycle mode. "
+            "'build': resolve/build the image and exit without starting a container. "
+            "'start': start or attach to a container using an already-available image "
+            "(fails if the image is missing and no build flag is set). "
+            "'run': ensure the image exists (building if needed) then start a container "
+            "(current default behavior)."
+        )
+    )
+
+    parser.add_argument("--env", action="append", required=False,
+                        default=None)  # Keep default=None so user-provided envs override defaults
+    DEFAULT_ENV_LIST = ["isaac_ros", "realsense"]
+
+    parser.add_argument("--extra_env",
+                        action="append",
+                        required=False,
+                        default=None,
+                        help="Additional environments to append after default environments")
+    parser.add_argument("--verbose", action="store_true", required=False, default=False)
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Do not use docker layer cache"
+    )
+    parser.add_argument(
+        "--build",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Build the image if it doesn't exist"
+    )
+    parser.add_argument(
+        "--build-local",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Build the image locally if it doesn't exist"
+    )
+    push_group = parser.add_mutually_exclusive_group()
+    push_group.add_argument(
+        "--push",
+        action="store_true",
+        dest="push",
+        default=False,
+        help="Push the image to the target registry when complete"
+    )
+    push_group.add_argument(
+        "--no-push",
+        action="store_false",
+        dest="push",
+        help="Do not push the image to the target registry when complete"
+    )
+    parser.add_argument(
+        "--container-name",
+        default="isaac_ros_dev_container",
+        help="Name of the Docker container"
+    )
+    parser.add_argument(
+        "-b", "--use-cached-build-image",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Use the cached build image"
+    )
+    parser.add_argument(
+        "--platform",
+        choices=["x86_64", "aarch64"],
+        default=os.uname().machine,
+        help="Override the platform architecture (default: auto-detected)"
+    )
+    parser.add_argument(
+        "-d", "--isaac-dir",
+        help="Specify the ISAAC directory path (overrides ISAAC_DIR environment variable)"
+    )
+    parser.add_argument(
+        "--isaac-ros-platform",
+        default=None,
+        help="Isaac ROS platform identifier (e.g., amd64, arm64-jetpack, arm64-fastos)"
+    )
+    parser.add_argument(
+        "--build-arg",
+        action="append",
+        dest="build_args",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Docker build argument forwarded to image resolution and build"
+    )
+    args = parser.parse_args()
+
+    # Apply default env values only if nothing was provided
+    if args.env is None:
+        args.env = DEFAULT_ENV_LIST.copy()
+
+    # Append extra environments if provided
+    if args.extra_env:
+        args.env.extend([e for e in args.extra_env if e not in args.env])
+
+    # Auto-detect isaac_ros_platform from host when not explicitly provided
+    if args.isaac_ros_platform is None:
+        machine = args.platform  # already defaults to os.uname().machine
+        if machine == 'x86_64':
+            args.isaac_ros_platform = 'amd64'
+        elif machine == 'aarch64':
+            if os.path.exists('/etc/fastos-release'):
+                args.isaac_ros_platform = 'arm64-fastos'
+            elif os.path.exists('/etc/nv_tegra_release'):
+                args.isaac_ros_platform = 'arm64-jetpack'
+            else:
+                print("Warning: Could not determine Isaac ROS platform on ARM64. "
+                      "Defaulting to 'arm64-jetpack'. "
+                      "Use --isaac-ros-platform to override.")
+                args.isaac_ros_platform = 'arm64-jetpack'
+
+    return args
+
+
+def get_isaac_dir(args=None):
+    """
+    Returns the absolute path of the ISAAC directory.
+
+    The directory is determined in the following order:
+    1. Command line argument --isaac-dir if provided
+    2. ISAAC_DIR environment variable if set
+    3. Auto-detection by walking up from script location
+    4. The repository root when running the local isaac-ros-cli copy
+
+    Returns:
+        str: The absolute path of the ISAAC directory.
+    """
+    if args is None:
+        args = parse_args()
+    if args.isaac_dir:
+        isaac_dir = args.isaac_dir
+    elif "ISAAC_DIR" in os.environ:
+        isaac_dir = os.environ.get("ISAAC_DIR")
+    else:
+        isaac_dir = os.path.dirname(os.path.abspath(__file__))
+        max_depth = 10
+        while (
+            not os.path.basename(isaac_dir) == "isaac"
+            and max_depth > 0
+        ):
+            isaac_dir = os.path.dirname(isaac_dir)
+            max_depth -= 1
+        if max_depth == 0:
+            local_cli_dir = os.path.dirname(os.path.abspath(__file__))
+            if os.path.isfile(os.path.join(local_cli_dir, ".build_image_layers.yaml")):
+                isaac_dir = os.path.dirname(local_cli_dir)
+            else:
+                raise ValueError(
+                    "Could not find ISAAC directory. Set ISAAC_DIR or use --isaac-dir."
+                )
+    return os.path.abspath(isaac_dir)
+
+
+def validate_prerequisites(args, isaac_dir):
+    """Run all prerequisite checks (workspace, Docker, git-lfs)."""
+    validate_isaac_dir(isaac_dir)
+    check_user_in_docker_group()
+    check_docker_running()
+    check_git_lfs_installed()
+    check_lfs_files(isaac_dir)
+
+
+def resolve_target_image(args, config, env_list, build_args=None):
+    """Determine the target image name and cache registry.
+
+    Returns (base_name, cache_from_registry_name, cached_image_name).
+    """
+    if args.no_cache:
+        cache_from_registry_name = "local"
+    else:
+        cache_from_registry_name = check_docker_logins(
+            config["cache_from_registry_names"], fail_on_anon=True
+        )
+
+    print(env_list)
+
+    cached_image_name = "cached_isaac_run_dev_image_local:latest"
+    base_name = get_image_name(
+        cache_from_registry_name,
+        env_list,
+        args.isaac_ros_platform,
+        include_hash=True,
+        build_args=build_args,
+    )
+
+    if args.use_cached_build_image:
+        cached_image_exists = subprocess.run(
+            ["docker", "image", "inspect", cached_image_name],
+            capture_output=True
+        ).returncode == 0
+
+        if not cached_image_exists:
+            print("No cached image found. "
+                  "Perhaps you cleaned docker cache, or you haven't yet "
+                  "run run_dev.py on this system?")
+            sys.exit(1)
+        base_name = cached_image_name
+
+    return base_name, cache_from_registry_name, cached_image_name
+
+
+def ensure_image_available(args, base_name, cached_image_name,
+                           config_path, env_list,
+                           allow_implicit_remote_build=False,
+                           build_args=None):
+    """Pull or build the Docker image so it is available locally.
+
+    Exits with an error if the image cannot be obtained.
+    """
+    if args.use_cached_build_image:
+        return
+
+    if make_docker_image_available(base_name, cached_image_name):
+        return
+
+    if not (args.build or args.build_local or allow_implicit_remote_build):
+        print(f"Error: Docker image {base_name} not found.")
+        print("Use --build to build remotely or --build-local to build locally.")
+        sys.exit(1)
+
+    build_kwargs = {
+        'image_key_set': env_list,
+        'config_file': config_path,
+        'target_image_name': base_name,
+        'verbose': args.verbose,
+        'no_cache': args.no_cache,
+        'isaac_ros_platform': args.isaac_ros_platform,
+    }
+    if build_args:
+        build_kwargs['build_args'] = build_args
+
+    if args.build_local:
+        build_kwargs['build_local'] = True
+
+    if args.push:
+        build_kwargs['push'] = True
+
+    build_image_layers(**build_kwargs)
+    if not make_docker_image_available(base_name, cached_image_name):
+        print(f"Error: Failed to build or pull image {base_name}")
+        sys.exit(1)
+
+
+def check_local_image_exists(image_name):
+    """Return True if the Docker image exists locally."""
+    return subprocess.run(
+        ["docker", "image", "inspect", image_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def start_container(args, container_name, base_name, isaac_dir):
+    """Clean up exited containers, attach to a running one, or launch a new one."""
+    remove_exited_container(container_name)
+    if attach_to_running_container(container_name):
+        return
+    run_docker_container(args, container_name, base_name, isaac_dir)
+
+
+def main():
+    args = parse_args()
+    config_path = get_isaac_ros_common_config_path()
+    config = get_isaac_ros_common_config_values(config_path)
+
+    env_list = get_build_order(
+        str(config['image_key_order'][0]).split('.'),
+        args.env
+    )
+    isaac_dir = get_isaac_dir(args)
+    build_args = args.build_args
+    container_name = args.container_name
+
+    validate_prerequisites(args, isaac_dir)
+
+    if args.mode == 'build':
+        base_name, _, cached_image_name = resolve_target_image(
+            args, config, env_list, build_args=build_args)
+        ensure_image_available(
+            args, base_name, cached_image_name, config_path, env_list,
+            allow_implicit_remote_build=True,
+            build_args=build_args)
+        print(f"Image ready: {base_name}")
+        return
+
+    if args.mode == 'start':
+        base_name, _, cached_image_name = resolve_target_image(
+            args, config, env_list, build_args=build_args)
+        if not check_local_image_exists(base_name):
+            print(f"Error: Docker image {base_name} not found locally.")
+            print("Build the image first with '--mode build', or use '--mode run' "
+                  "to build and start in one step.")
+            sys.exit(1)
+        print(f"Using image: {base_name}")
+        start_container(args, container_name, base_name, isaac_dir)
+        return
+
+    # Default 'run' mode: preserve the historical attach-first behavior.
+    remove_exited_container(container_name)
+    if attach_to_running_container(container_name):
+        return
+
+    # No running container was found, so ensure the image exists and launch one.
+    base_name, _, cached_image_name = resolve_target_image(
+        args, config, env_list, build_args=build_args)
+    ensure_image_available(
+        args, base_name, cached_image_name, config_path, env_list, build_args=build_args)
+    print(f"Using image: {base_name}")
+    start_container(args, container_name, base_name, isaac_dir)
+
+
+if __name__ == "__main__":
+    main()
