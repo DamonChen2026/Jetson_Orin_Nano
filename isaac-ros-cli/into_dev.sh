@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # default name = isaac_ros_dev_<host user>, same rule as start_dev.sh
-NAME="${ISAAC_DEV_CONTAINER:-isaac_ros_dev_${ISAAC_DEV_USER:-$(id -un)}}"
+NAME="${ISAAC_DEV_CONTAINER:-ros_dev_${ISAAC_DEV_USER:-$(id -un)}}"
 
 T0="${EPOCHREALTIME/[.,]/}"
 tm() { [ "${TIMING:-0}" = "1" ] && echo "[timing] $(( (${EPOCHREALTIME/[.,]/} - T0) / 1000 )) ms  $*" >&2 || true; }
@@ -36,7 +36,7 @@ for line in "${L[@]:3}"; do
   esac
 done
 CUSER="${ISAAC_DEV_USER:-${LABEL:-${ENV_USER:-$(id -un)}}}"
-WS="${WS:-/workspaces/isaac_ros-dev}"
+WS="${WS:-/workspaces}"
 CUID="${CUID:-$(id -u)}"
 
 if [ "$RUNNING" != "true" ]; then

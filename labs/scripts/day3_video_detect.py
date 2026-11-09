@@ -28,7 +28,6 @@ def make_gst_writer(path, fps, size):
 
 class AsyncVideoWriter:
     def __init__(self, path, fourcc, fps, size, max_queue=16):
-        # self.writer = cv2.VideoWriter(str(path), fourcc, fps, size)
         self.writer = make_gst_writer(path, fps, size)
         if not self.writer.isOpened():
             raise RuntimeError(f"Cannot create output video: {path}")
@@ -303,16 +302,6 @@ def main():
     # 3. 创建输出视频
     # ---------------------------------------------------------
     writer = AsyncVideoWriter(str(output_video), cv2.VideoWriter_fourcc(*"mp4v"), source_fps if source_fps > 0 else 10.0, (frame_w, frame_h))
-    # writer = cv2.VideoWriter(
-    #     str(output_video),
-    #     cv2.VideoWriter_fourcc(*"mp4v"),
-    #     source_fps if source_fps > 0 else 10.0,
-    #     (frame_w, frame_h),
-    # )
-    # if not writer.isOpened():
-    #     cap.release()
-    #     raise RuntimeError(f"Cannot create output video: {output_video}")
-
     # ---------------------------------------------------------
     # 4. 分配 CUDA 缓冲区，绑定 TensorRT 输入/输出地址
     # ---------------------------------------------------------

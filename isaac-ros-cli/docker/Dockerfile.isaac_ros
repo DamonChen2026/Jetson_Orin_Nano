@@ -89,6 +89,29 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi && \
     apt-get update
 
+# Install the Jetson TensorRT runtime and Python bindings. Keep this limited
+# to arm64 Jetson builds and pin the version validated on JetPack 7.2 / CUDA 13.2.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    if [[ ${PLATFORM} == 'arm64' ]]; then \
+        apt-get install -y \
+            libnvinfer10=10.16.2.10-1+cuda13.2 \
+            libnvinfer-plugin10=10.16.2.10-1+cuda13.2 \
+            libnvonnxparsers10=10.16.2.10-1+cuda13.2 \
+            python3-libnvinfer=10.16.2.10-1+cuda13.2; \
+    fi
+
+# Install the Jetson gstreamer1.0 and plugins. Keep this limited
+# to arm64 Jetson builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    if [[ ${PLATFORM} == 'arm64' ]]; then \
+        sudo apt-get install -y \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly
+        fi
+
 # Set up ROS 2 Lyrical apt repository (Isaac buildfarm CDN on noble).
 ARG ISAAC_ROS_CDN_KEY_URL="https://isaac.download.nvidia.com/isaac-ros/repos.key"
 ARG ISAAC_ROS_CDN_REPO="https://isaac.download.nvidia.com/isaac-ros/ubuntu/main"

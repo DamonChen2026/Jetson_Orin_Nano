@@ -8,7 +8,7 @@
 #      (Dockerfile.isaac_ros: ENV USERNAME=admin) so we override it with `-e USERNAME=<you>`; all
 #      /home/admin/... mount targets become /home/<you>/...
 #   4. a per-user container name: isaac_ros_dev_<user>  (e.g. isaac_ros_dev_chery)
-#   5. the in-container host name is "docker" (prompt: chery@docker:/workspaces/isaac_ros-dev$) instead of the
+#   5. the in-container host name is "docker" (prompt: chery@docker:/workspaces$) instead of the
 #      host's name; with --network host Docker would otherwise copy the host's name ("localhost").
 #      It is fixed when the container is CREATED -- changing it later means `docker rm -f <name>` and re-creating.
 #
@@ -59,7 +59,7 @@ if ! [[ "$CUSER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
   echo "[start_dev] '$CUSER' is not a valid Linux user name for the container (use ISAAC_DEV_USER=<name>)." >&2; exit 1
 fi
 
-NAME="${ISAAC_DEV_CONTAINER:-isaac_ros_dev_${CUSER}}"
+NAME="${ISAAC_DEV_CONTAINER:-ros_dev_${CUSER}}"
 case "$NAME" in
   *isaac_ros_dev_container*) echo "[start_dev] name '$NAME' must not contain 'isaac_ros_dev_container' (see comment at top); set ISAAC_DEV_CONTAINER=<other name>" >&2; exit 1 ;;
 esac
@@ -67,13 +67,13 @@ if ! [[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
   echo "[start_dev] '$NAME' is not a valid Docker container name." >&2; exit 1
 fi
 
-HNAME="${ISAAC_DEV_HOSTNAME:-docker}"
+HNAME="${ISAAC_DEV_HOSTNAME:-in-docker}"
 if ! [[ "$HNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
   echo "[start_dev] '$HNAME' is not a valid host name (use ISAAC_DEV_HOSTNAME=<name>)." >&2; exit 1
 fi
 
 IMAGE="${ISAAC_DEV_IMAGE:-nvcr.io/nvidia/isaac/ros:isaac_ros-realsense_1aab99481814f8622a5fdd169073390a-arm64-jetpack}"
-ISAAC_DIR="$(realpath -m "${ISAAC_ROS_WS:-$HOME/workspaces/isaac_ros-dev}")"
+ISAAC_DIR="$(realpath -m "${ISAAC_ROS_WS:-$HOME/workspaces}")"
 PLATFORM_ID="arm64-jetpack"
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -120,7 +120,7 @@ ARGS+=(-i -t -d
   --hostname "$HNAME" --add-host "$HNAME:127.0.0.1"
   -e "USERNAME=$CUSER"
   -e TERM=xterm-256color -e COLORTERM=truecolor -e FORCE_COLOR=true
-  --workdir /workspaces/isaac_ros-dev
+  --workdir /workspaces
   -e "ISAAC_ROS_PLATFORM=$PLATFORM_ID")
 
 # --- same as run_dev.py: get_docker_args() ---------------------------------------------------------
@@ -132,7 +132,7 @@ done
 ARGS+=(-e "DISPLAY=${DISPLAY:-:0}"
   -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all
   -e ROS_DOMAIN_ID -e USER
-  -e ISAAC_ROS_WS=/workspaces/isaac_ros-dev
+  -e ISAAC_ROS_WS=/workspaces
   -e "HOST_USER_UID=$CUID" -e "HOST_USER_GID=$CGID")
 [ -e /etc/fastos-release ] && ARGS+=(-v /etc/fastos-release:/etc/fastos-release:ro)
 
@@ -185,7 +185,7 @@ elif [ -f /etc/isaac-ros-cli/.isaac_ros_dev-dockerargs ];       then add_dockera
 fi
 
 # --- workspace, time zone, GPU, entrypoint ------------------------------------------------------------
-ARGS+=(-v "$ISAAC_DIR:/workspaces/isaac_ros-dev"
+ARGS+=(-v "$ISAAC_DIR:/workspaces"
   -v /etc/localtime:/etc/localtime:ro
   --name "$NAME"
   --gpus all
